@@ -83,6 +83,29 @@ cp .env.example .env
 
 `命令行参数 > 环境变量(.env) > 数据库设置 > 默认值`
 
+如果你希望固定项目端口为 `7686`，直接设置环境变量即可，不需要改源码：
+
+```bash
+APP_PORT=7686
+```
+
+如果你想尽量不改 `codex-console` 原文件，而是通过独立脚本自动同步到本地 `Codex-Manager`，可以运行：
+
+```bash
+APP_PORT=7686
+CODEX_MANAGER_SYNC_ENABLED=true
+CODEX_MANAGER_RPC_URL=http://127.0.0.1:48760
+CODEX_MANAGER_RPC_TOKEN_FILE=/path/to/codexmanager.rpc-token
+python scripts/run_codex_console_with_codex_manager_sync.py
+```
+
+说明：
+
+- 这个脚本会外部启动 `codex-console`，并单独轮询本地数据库，把新账号同步到 `Codex-Manager`
+- 脚本连的是 `Codex-Manager` 本地 service RPC，默认 `127.0.0.1:48760`
+- 不要填 `48761`，那个是 web 界面端口，不适合脚本直连
+- 该脚本当前按 SQLite 模式工作
+
 ## 启动 Web UI
 
 ```bash
