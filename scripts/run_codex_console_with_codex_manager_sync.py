@@ -32,6 +32,7 @@ DEFAULT_WEB_PORT = 7686
 DEFAULT_POLL_SECONDS = 5
 DEFAULT_RPC_URL = "http://127.0.0.1:48760"
 DEFAULT_RPC_TOKEN_FILENAME = "codexmanager.rpc-token"
+DEFAULT_CODEX_MANAGER_DB_FILENAME = "codexmanager.db"
 
 
 def log(message: str) -> None:
@@ -86,15 +87,7 @@ def resolve_rpc_url() -> str:
     return raw.rstrip("/")
 
 
-def resolve_rpc_token() -> str:
-    direct = str(
-        os.environ.get("CODEX_MANAGER_RPC_TOKEN")
-        or os.environ.get("CODEXMANAGER_RPC_TOKEN")
-        or ""
-    ).strip()
-    if direct:
-        return direct
-
+def resolve_rpc_token_path() -> Optional[Path]:
     token_file = str(
         os.environ.get("CODEX_MANAGER_RPC_TOKEN_FILE")
         or os.environ.get("CODEXMANAGER_RPC_TOKEN_FILE")
@@ -103,7 +96,7 @@ def resolve_rpc_token() -> str:
     if token_file:
         path = Path(token_file).expanduser()
         if path.is_file():
-            return path.read_text(encoding="utf-8").strip()
+            return path
 
     data_dir = str(
         os.environ.get("CODEX_MANAGER_DATA_DIR")
@@ -113,9 +106,64 @@ def resolve_rpc_token() -> str:
     if data_dir:
         path = Path(data_dir).expanduser() / DEFAULT_RPC_TOKEN_FILENAME
         if path.is_file():
-            return path.read_text(encoding="utf-8").strip()
+            return path
+
+    appdata = os.environ.get("APPDATA")
+    localappdata = os.environ.get("LOCALAPPDATA")
+    candidates = []
+    if appdata:
+        candidates.append(Path(appdata) / "com.codexmanager.desktop" / DEFAULT_RPC_TOKEN_FILENAME)
+    if localappdata:
+        candidates.append(Path(localappdata) / "com.codexmanager.desktop" / DEFAULT_RPC_TOKEN_FILENAME)
+    candidates.append(Path.home() / ".codexmanager" / DEFAULT_RPC_TOKEN_FILENAME)
+
+    for path in candidates:
+        if path.is_file():
+            return path
+
+    return None
+
+
+def resolve_rpc_token() -> str:
+    direct = str(
+        os.environ.get("CODEX_MANAGER_RPC_TOKEN")
+        or os.environ.get("CODEXMANAGER_RPC_TOKEN")
+        or ""
+    ).strip()
+    if direct:
+        return direct
+
+    path = resolve_rpc_token_path()
+    if path and path.is_file():
+        return path.read_text(encoding="utf-8").strip()
 
     return ""
+
+
+def resolve_codex_manager_db_path() -> Optional[Path]:
+    data_dir = str(
+        os.environ.get("CODEX_MANAGER_DATA_DIR")
+        or os.environ.get("CODEXMANAGER_DATA_DIR")
+        or ""
+    ).strip()
+    if data_dir:
+        path = Path(data_dir).expanduser() / DEFAULT_CODEX_MANAGER_DB_FILENAME
+        if path.is_file():
+            return path
+
+    token_path = resolve_rpc_token_path()
+    if token_path is not None:
+        candidate = token_path.parent / DEFAULT_CODEX_MANAGER_DB_FILENAME
+        if candidate.is_file():
+            return candidate
+
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidate = Path(appdata) / "com.codexmanager.desktop" / DEFAULT_CODEX_MANAGER_DB_FILENAME
+        if candidate.is_file():
+            return candidate
+
+    return None
 
 
 def load_state() -> Dict[str, str]:
@@ -153,30 +201,24 @@ def account_fingerprint(row: sqlite3.Row) -> str:
 
 def build_import_item(row: sqlite3.Row) -> Optional[dict]:
     access_token = str(row["access_token"] or "").strip()
-    refresh_token = str(row["refresh_token"] or "").strip()
-    id_token = str(row["id_token"] or "").strip()
-    if not access_token or not refresh_token or not id_token:
+    if not access_token:
         return None
 
     account_id = str(row["account_id"] or "").strip()
     workspace_id = str(row["workspace_id"] or "").strip()
+    refresh_token = str(row["refresh_token"] or "").strip()
+    id_token = str(row["id_token"] or "").strip()
 
     item = {
-        "tokens": {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "id_token": id_token,
-        },
-        "meta": {
-            "label": str(row["email"] or "").strip() or f"account-{row['id']}",
-        },
+        "type": "chatgptAuthTokens",
+        "accessToken": access_token,
+        "chatgptAccountId": account_id,
+        "workspaceId": workspace_id,
     }
-    if account_id:
-        item["tokens"]["account_id"] = account_id
-        item["tokens"]["chatgpt_account_id"] = account_id
-        item["meta"]["chatgpt_account_id"] = account_id
-    if workspace_id:
-        item["meta"]["workspace_id"] = workspace_id
+    if refresh_token:
+        item["refreshToken"] = refresh_token
+    if id_token:
+        item["idToken"] = id_token
     return item
 
 
@@ -212,25 +254,133 @@ def rpc_call(rpc_url: str, rpc_token: str, method: str, params: dict) -> dict:
     return result
 
 
-def sync_account(rpc_url: str, rpc_token: str, row: sqlite3.Row) -> None:
-    item = build_import_item(row)
-    if item is None:
-        raise RuntimeError("missing required tokens: access_token, refresh_token, id_token")
+def get_manual_account_id(rpc_url: str, rpc_token: str) -> Optional[str]:
+    result = rpc_call(rpc_url, rpc_token, "gateway/manualAccount/get", {})
+    value = str(result.get("accountId") or "").strip()
+    return value or None
 
-    result = rpc_call(
+
+def get_current_auth_account(rpc_url: str, rpc_token: str) -> Optional[dict]:
+    result = rpc_call(rpc_url, rpc_token, "account/read", {"refreshToken": False})
+    account = result.get("account")
+    if isinstance(account, dict):
+        return account
+    return None
+
+
+def update_account_label(rpc_url: str, rpc_token: str, account_id: str, label: str) -> None:
+    rpc_call(
         rpc_url,
         rpc_token,
-        "account/import",
-        {"contents": [json.dumps(item, ensure_ascii=False)]},
+        "account/update",
+        {
+            "accountId": account_id,
+            "label": label,
+        },
     )
-    failed = int(result.get("failed") or 0)
-    if failed > 0:
-        errors = result.get("errors") or []
-        if isinstance(errors, list) and errors:
-            first = errors[0]
-            if isinstance(first, dict):
-                raise RuntimeError(str(first.get("message") or "Codex-Manager import failed"))
-        raise RuntimeError("Codex-Manager import failed")
+
+
+def set_manual_account_id(rpc_url: str, rpc_token: str, account_id: Optional[str]) -> None:
+    if account_id:
+        rpc_call(rpc_url, rpc_token, "gateway/manualAccount/set", {"accountId": account_id})
+    else:
+        rpc_call(rpc_url, rpc_token, "gateway/manualAccount/clear", {})
+
+
+def snapshot_auth_state(db_path: Optional[Path]) -> Optional[Dict[str, Optional[str]]]:
+    if db_path is None or not db_path.is_file():
+        return None
+
+    connection = sqlite3.connect(str(db_path))
+    try:
+        rows = connection.execute(
+            """
+            SELECT key, value
+            FROM app_settings
+            WHERE key IN ('auth.current_account_id', 'auth.current_auth_mode')
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    mapping = {str(key): str(value) for key, value in rows}
+    return {
+        "auth.current_account_id": mapping.get("auth.current_account_id"),
+        "auth.current_auth_mode": mapping.get("auth.current_auth_mode"),
+    }
+
+
+def restore_auth_state(db_path: Optional[Path], state: Optional[Dict[str, Optional[str]]]) -> bool:
+    if db_path is None or not db_path.is_file() or state is None:
+        return False
+
+    try:
+        connection = sqlite3.connect(str(db_path))
+    except sqlite3.Error:
+        return False
+
+    try:
+        try:
+            for key in ("auth.current_account_id", "auth.current_auth_mode"):
+                value = state.get(key)
+                if value is None:
+                    connection.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO app_settings(key, value, updated_at)
+                        VALUES (?, ?, strftime('%s','now'))
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                        """,
+                        (key, value),
+                    )
+            connection.commit()
+            return True
+        except sqlite3.Error:
+            return False
+    finally:
+        connection.close()
+
+
+def sync_account(rpc_url: str, rpc_token: str, row: sqlite3.Row, codex_manager_db_path: Optional[Path]) -> None:
+    item = build_import_item(row)
+    if item is None:
+        raise RuntimeError("missing required token: access_token")
+
+    previous_manual_account_id = get_manual_account_id(rpc_url, rpc_token)
+    previous_auth_state = snapshot_auth_state(codex_manager_db_path)
+    try:
+        rpc_call(
+            rpc_url,
+            rpc_token,
+            "account/login/start",
+            item,
+        )
+        current_account = get_current_auth_account(rpc_url, rpc_token)
+        if current_account:
+            current_id = str(current_account.get("accountId") or "").strip()
+            current_chatgpt_id = str(current_account.get("chatgptAccountId") or "").strip()
+            current_workspace_id = str(current_account.get("workspaceId") or "").strip()
+            expected_chatgpt_id = str(row["account_id"] or "").strip()
+            expected_workspace_id = str(row["workspace_id"] or "").strip()
+            email = str(row["email"] or "").strip()
+            if (
+                current_id
+                and email
+                and (
+                    (expected_chatgpt_id and current_chatgpt_id == expected_chatgpt_id)
+                    or (expected_workspace_id and current_workspace_id == expected_workspace_id)
+                )
+            ):
+                update_account_label(rpc_url, rpc_token, current_id, email)
+    finally:
+        try:
+            try:
+                set_manual_account_id(rpc_url, rpc_token, previous_manual_account_id)
+            except Exception:
+                pass
+        finally:
+            restore_auth_state(codex_manager_db_path, previous_auth_state)
 
 
 def sync_loop(stop_event: threading.Event, database_path: Path) -> None:
@@ -244,10 +394,14 @@ def sync_loop(stop_event: threading.Event, database_path: Path) -> None:
     if not rpc_token:
         log("Codex-Manager RPC token missing; sync loop will not start")
         return
+    codex_manager_db_path = resolve_codex_manager_db_path()
 
     poll_seconds = int(str(os.environ.get("CODEX_MANAGER_POLL_SECONDS") or DEFAULT_POLL_SECONDS).strip() or DEFAULT_POLL_SECONDS)
     fingerprints = load_state()
-    log(f"Codex-Manager sync loop started: db={database_path} rpc={rpc_url} poll={poll_seconds}s")
+    log(
+        f"Codex-Manager sync loop started: db={database_path} rpc={rpc_url} "
+        f"manager_db={codex_manager_db_path or 'unknown'} poll={poll_seconds}s"
+    )
 
     while not stop_event.is_set():
         try:
@@ -281,7 +435,7 @@ def sync_loop(stop_event: threading.Event, database_path: Path) -> None:
                 if fingerprints.get(key) == fingerprint:
                     continue
                 try:
-                    sync_account(rpc_url, rpc_token, row)
+                    sync_account(rpc_url, rpc_token, row, codex_manager_db_path)
                     fingerprints[key] = fingerprint
                     changed = True
                     log(f"synced account #{row['id']} {row['email']}")
