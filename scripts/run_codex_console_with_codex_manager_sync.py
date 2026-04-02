@@ -35,6 +35,38 @@ DEFAULT_RPC_TOKEN_FILENAME = "codexmanager.rpc-token"
 DEFAULT_CODEX_MANAGER_DB_FILENAME = "codexmanager.db"
 
 
+def resolve_project_python() -> Optional[Path]:
+    if os.name == "nt":
+        candidate = ROOT / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = ROOT / ".venv" / "bin" / "python"
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+def ensure_project_python() -> None:
+    project_python = resolve_project_python()
+    if project_python is None:
+        return
+
+    current_python = Path(sys.executable).resolve()
+    target_python = project_python.resolve()
+    if current_python == target_python:
+        return
+
+    if os.environ.get("CODEX_CONSOLE_BOOTSTRAPPED") == "1":
+        return
+
+    env = os.environ.copy()
+    env["CODEX_CONSOLE_BOOTSTRAPPED"] = "1"
+    os.execve(
+        str(target_python),
+        [str(target_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        env,
+    )
+
+
 def log(message: str) -> None:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{stamp}] {message}", flush=True)
@@ -42,7 +74,12 @@ def log(message: str) -> None:
 
 def resolve_console_env() -> Dict[str, str]:
     env = os.environ.copy()
-    port = str(env.get("CODEX_CONSOLE_PORT") or env.get("APP_PORT") or env.get("WEBUI_PORT") or DEFAULT_WEB_PORT)
+    port = str(
+        env.get("CODEX_CONSOLE_PORT")
+        or env.get("APP_PORT")
+        or env.get("WEBUI_PORT")
+        or DEFAULT_WEB_PORT
+    )
     env["APP_PORT"] = port
     env["WEBUI_PORT"] = port
     return env
@@ -76,10 +113,14 @@ def resolve_rpc_url() -> str:
         raw = DEFAULT_RPC_URL
     if "://" not in raw:
         raw = f"http://{raw}"
+
     parsed = urllib.parse.urlparse(raw)
     path = (parsed.path or "").rstrip("/")
     if parsed.port == 48761 or path == "/api/rpc":
-        raise RuntimeError("use Codex-Manager service RPC address (default 127.0.0.1:48760), not the web UI port 48761")
+        raise RuntimeError(
+            "use Codex-Manager service RPC address "
+            "(default 127.0.0.1:48760), not the web UI port 48761"
+        )
     if path == "/rpc":
         return raw.rstrip("/")
     if path in {"", "/"}:
@@ -112,9 +153,13 @@ def resolve_rpc_token_path() -> Optional[Path]:
     localappdata = os.environ.get("LOCALAPPDATA")
     candidates = []
     if appdata:
-        candidates.append(Path(appdata) / "com.codexmanager.desktop" / DEFAULT_RPC_TOKEN_FILENAME)
+        candidates.append(
+            Path(appdata) / "com.codexmanager.desktop" / DEFAULT_RPC_TOKEN_FILENAME
+        )
     if localappdata:
-        candidates.append(Path(localappdata) / "com.codexmanager.desktop" / DEFAULT_RPC_TOKEN_FILENAME)
+        candidates.append(
+            Path(localappdata) / "com.codexmanager.desktop" / DEFAULT_RPC_TOKEN_FILENAME
+        )
     candidates.append(Path.home() / ".codexmanager" / DEFAULT_RPC_TOKEN_FILENAME)
 
     for path in candidates:
@@ -159,7 +204,9 @@ def resolve_codex_manager_db_path() -> Optional[Path]:
 
     appdata = os.environ.get("APPDATA")
     if appdata:
-        candidate = Path(appdata) / "com.codexmanager.desktop" / DEFAULT_CODEX_MANAGER_DB_FILENAME
+        candidate = (
+            Path(appdata) / "com.codexmanager.desktop" / DEFAULT_CODEX_MANAGER_DB_FILENAME
+        )
         if candidate.is_file():
             return candidate
 
@@ -182,7 +229,10 @@ def load_state() -> Dict[str, str]:
 def save_state(fingerprints: Dict[str, str]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     payload = {"fingerprints": fingerprints, "updated_at": int(time.time())}
-    STATE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    STATE_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def account_fingerprint(row: sqlite3.Row) -> str:
@@ -242,6 +292,7 @@ def rpc_call(rpc_url: str, rpc_token: str, method: str, params: dict) -> dict:
     )
     with urllib.request.urlopen(request, timeout=15) as response:
         payload = response.read().decode("utf-8", errors="replace")
+
     parsed = json.loads(payload)
     if isinstance(parsed, dict) and parsed.get("error"):
         error = parsed["error"]
@@ -268,7 +319,12 @@ def get_current_auth_account(rpc_url: str, rpc_token: str) -> Optional[dict]:
     return None
 
 
-def update_account_label(rpc_url: str, rpc_token: str, account_id: str, label: str) -> None:
+def update_account_label(
+    rpc_url: str,
+    rpc_token: str,
+    account_id: str,
+    label: str,
+) -> None:
     rpc_call(
         rpc_url,
         rpc_token,
@@ -280,7 +336,11 @@ def update_account_label(rpc_url: str, rpc_token: str, account_id: str, label: s
     )
 
 
-def set_manual_account_id(rpc_url: str, rpc_token: str, account_id: Optional[str]) -> None:
+def set_manual_account_id(
+    rpc_url: str,
+    rpc_token: str,
+    account_id: Optional[str],
+) -> None:
     if account_id:
         rpc_call(rpc_url, rpc_token, "gateway/manualAccount/set", {"accountId": account_id})
     else:
@@ -310,7 +370,10 @@ def snapshot_auth_state(db_path: Optional[Path]) -> Optional[Dict[str, Optional[
     }
 
 
-def restore_auth_state(db_path: Optional[Path], state: Optional[Dict[str, Optional[str]]]) -> bool:
+def restore_auth_state(
+    db_path: Optional[Path],
+    state: Optional[Dict[str, Optional[str]]],
+) -> bool:
     if db_path is None or not db_path.is_file() or state is None:
         return False
 
@@ -330,7 +393,9 @@ def restore_auth_state(db_path: Optional[Path], state: Optional[Dict[str, Option
                         """
                         INSERT INTO app_settings(key, value, updated_at)
                         VALUES (?, ?, strftime('%s','now'))
-                        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                        ON CONFLICT(key) DO UPDATE SET
+                            value=excluded.value,
+                            updated_at=excluded.updated_at
                         """,
                         (key, value),
                     )
@@ -342,7 +407,12 @@ def restore_auth_state(db_path: Optional[Path], state: Optional[Dict[str, Option
         connection.close()
 
 
-def sync_account(rpc_url: str, rpc_token: str, row: sqlite3.Row, codex_manager_db_path: Optional[Path]) -> None:
+def sync_account(
+    rpc_url: str,
+    rpc_token: str,
+    row: sqlite3.Row,
+    codex_manager_db_path: Optional[Path],
+) -> None:
     item = build_import_item(row)
     if item is None:
         raise RuntimeError("missing required token: access_token")
@@ -350,12 +420,7 @@ def sync_account(rpc_url: str, rpc_token: str, row: sqlite3.Row, codex_manager_d
     previous_manual_account_id = get_manual_account_id(rpc_url, rpc_token)
     previous_auth_state = snapshot_auth_state(codex_manager_db_path)
     try:
-        rpc_call(
-            rpc_url,
-            rpc_token,
-            "account/login/start",
-            item,
-        )
+        rpc_call(rpc_url, rpc_token, "account/login/start", item)
         current_account = get_current_auth_account(rpc_url, rpc_token)
         if current_account:
             current_id = str(current_account.get("accountId") or "").strip()
@@ -369,7 +434,10 @@ def sync_account(rpc_url: str, rpc_token: str, row: sqlite3.Row, codex_manager_d
                 and email
                 and (
                     (expected_chatgpt_id and current_chatgpt_id == expected_chatgpt_id)
-                    or (expected_workspace_id and current_workspace_id == expected_workspace_id)
+                    or (
+                        expected_workspace_id
+                        and current_workspace_id == expected_workspace_id
+                    )
                 )
             ):
                 update_account_label(rpc_url, rpc_token, current_id, email)
@@ -394,10 +462,14 @@ def sync_loop(stop_event: threading.Event, database_path: Path) -> None:
     if not rpc_token:
         log("Codex-Manager RPC token missing; sync loop will not start")
         return
-    codex_manager_db_path = resolve_codex_manager_db_path()
 
-    poll_seconds = int(str(os.environ.get("CODEX_MANAGER_POLL_SECONDS") or DEFAULT_POLL_SECONDS).strip() or DEFAULT_POLL_SECONDS)
+    codex_manager_db_path = resolve_codex_manager_db_path()
+    poll_seconds = int(
+        str(os.environ.get("CODEX_MANAGER_POLL_SECONDS") or DEFAULT_POLL_SECONDS).strip()
+        or DEFAULT_POLL_SECONDS
+    )
     fingerprints = load_state()
+
     log(
         f"Codex-Manager sync loop started: db={database_path} rpc={rpc_url} "
         f"manager_db={codex_manager_db_path or 'unknown'} poll={poll_seconds}s"
@@ -427,13 +499,16 @@ def sync_loop(stop_event: threading.Event, database_path: Path) -> None:
                 status = str(row["status"] or "").strip().lower()
                 if status and status not in {"active", "expired", "banned", "failed"}:
                     continue
+
                 item = build_import_item(row)
                 if item is None:
                     continue
+
                 key = str(row["id"])
                 fingerprint = account_fingerprint(row)
                 if fingerprints.get(key) == fingerprint:
                     continue
+
                 try:
                     sync_account(rpc_url, rpc_token, row, codex_manager_db_path)
                     fingerprints[key] = fingerprint
@@ -463,15 +538,24 @@ def start_webui(env: Dict[str, str]) -> subprocess.Popen:
 
 
 def main() -> int:
+    ensure_project_python()
+
     env = resolve_console_env()
     database_path = resolve_database_path(env)
 
     stop_event = threading.Event()
-    thread = threading.Thread(target=sync_loop, args=(stop_event, database_path), daemon=True)
+    thread = threading.Thread(
+        target=sync_loop,
+        args=(stop_event, database_path),
+        daemon=True,
+    )
     thread.start()
 
     child: Optional[subprocess.Popen] = None
-    start_web = str(os.environ.get("CODEX_CONSOLE_START_WEBUI") or "true").strip().lower() in {"1", "true", "yes", "on"}
+    start_web = (
+        str(os.environ.get("CODEX_CONSOLE_START_WEBUI") or "true").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
 
     try:
         if start_web:
